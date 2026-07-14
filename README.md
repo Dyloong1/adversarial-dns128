@@ -58,42 +58,63 @@ python eval/eval_ad.py data/adv_traj
 python scripts/make_gif.py data/dns128_relam37/seed00 data/flow.gif
 ```
 
-## ⭐ The simple adversarial API — `advance(x)`
+## ⭐ The adversarial API — two explicit paths, no hidden preprocessing
 
-**One function.** You give a velocity field `x` (your original frame, **or** your frame with
-an adversarial perturbation already added — anything), we return the **true DNS next frame**.
-You do **not** need to make the perturbation physically valid: any `x` is first projected
-onto the incompressible-DNS manifold (Leray + dealias), so whatever you did to it, we step a
-legal DNS state and return its true evolution.
+We provide the DNS "next frame" service; **the attacker's developer chooses the threat
+model**. There are **two paths**, and which one you use is a real experimental-design
+decision for an adversarial paper — so nothing is done silently.
 
 ```python
-from advance import advance
+from advance import advance_raw, advance_projected, input_legality, project_to_manifold, legal_perturb
 
-x_next = advance(x)          # x, x_next : (3, 128, 128, 128) numpy/torch, any real dtype
+x_next = advance_raw(x)          # step x AS GIVEN; refuse if x is not a legal DNS state
+x_next = advance_projected(x)    # project x onto the legal manifold, THEN step
 ```
 
-That's the whole interface. Options (all optional):
+`x`, `x_next`: `(3, 128, 128, 128)` (channels u, v, w), numpy or torch, any real dtype;
+returns numpy float32.
+
+### Which path? (this matters for the paper)
+
+- **`advance_raw(x)` — attacker owns legality (recommended default).** Steps `x` exactly as
+  given. If `x` is **not** a legal DNS state (compressible / aliased / under-resolved), it
+  **raises** by default (or `on_illegal="warn"/"ignore"`) — it does **not** silently fix it.
+  Use this when the threat model constrains the attacker to legal perturbations: the model's
+  robustness is then measured on *exactly* the attacker's field, with no purification in the
+  loop.
+- **`advance_projected(x)` — pipeline purifies.** Projects `x` onto the incompressible-DNS
+  manifold (Leray + dealias) and then steps. **This projection is an input-purification
+  defense** — it strips the compressible/aliased part of the attack. If you use it, report it
+  as part of your pipeline, not as a neutral format step, or a reviewer will ask whether you
+  measured the model's robustness or the projection's.
+
+**Why we default to raw / no projection:** auto-projecting would inject a hidden defense into
+the data pipeline and confound "model robustness" with "our preprocessing". The clean threat
+model is *the attacker is restricted to the legal DNS manifold* (a constraint on the attack),
+not *we quietly repair illegal inputs*.
+
+### Helpers so the attacker can decide
 
 ```python
-x_next, info = advance(x, seed=0, return_info=True)
-#   seed        : forcing realization (0..7 match dataset seeds; ou_seed = 1000+seed)
-#   frame_dt    : sim-time to advance (default 0.30 = one dataset frame)
-#   dt          : sub-step size (default: CFL-chosen — recommended)
-#   return_info : also returns {div_residual, k_max_eta, K, legal}
-#   info["legal"] is True when the returned frame is incompressible (div<1e-6) + Class I
+info = input_legality(x)      # {div_residual, k_max_eta, K, compressible_fraction,
+                              #  aliased_fraction, legal}  -> attacker self-checks
+x_leg = project_to_manifold(x)     # attacker projects themselves, if they want to
+x_adv = legal_perturb(x, amp=0.10, seed=0)   # we build a LEGAL adversarial example for you
+x_next = advance_raw(x_adv)                  # ... which raw then steps without complaint
 ```
 
-If you'd rather **we** generate the legal adversarial example for you:
+Legality = incompressible (div residual ≲ 1e-5, fp32-safe) **and** Class I (k_maxη ≥ 1.5)
+**and** no aliased-band energy. A real compressible/aliased attack is ~1e-1 — far above the
+fp32 noise floor — so it is correctly refused; a genuinely legal fp32 frame is accepted.
 
-```python
-from advance import advance, legal_perturb
-x_adv  = legal_perturb(x, amp=0.10, seed=0)   # amp = relative rms perturbation budget
-x_next = advance(x_adv)
-```
+Options on both: `seed` (forcing realization, 0..7 match dataset seeds → ou_seed 1000+seed),
+`frame_dt` (sim-time to advance, default 0.30 = one dataset frame), `dt` (sub-step, default
+CFL), `return_info=True` (also returns legality of input and next frame). Run from the
+package root; first call builds the grid (~1 s), later calls reuse it.
 
-`x` must be shape `(3, 128, 128, 128)` (channels = u, v, w). Run once from the package root
-(`import advance` puts the solver on the path). First call builds the grid (~1 s); subsequent
-calls reuse it.
+`tests/test_adversarial.py` constructs legal / compressible / high-frequency perturbations
+and asserts raw steps the legal ones and refuses the illegal ones (no silent fix) — run it to
+see the honest behavior.
 
 ## The adversarial internals (`step_from_frame.py`)
 
