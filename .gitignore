@@ -1,0 +1,5 @@
+data/
+*.pt
+*.gif
+__pycache__/
+*.pyc
