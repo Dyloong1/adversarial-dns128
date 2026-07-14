@@ -110,6 +110,37 @@ def main():
         refused_hf = True
     check("advance_raw REFUSES aliased input", refused_hf)
 
+    # --- END-TO-END on a REAL dataset frame loaded from disk (the actual user flow) ---
+    import glob
+    disk = sorted(glob.glob(str(Path(__file__).resolve().parents[1] /
+                                "data" / "dns128_relam37" / "seed*" / "frame*.pt")))
+    if disk:
+        import numpy as _np
+        d = torch.load(disk[len(disk)//2], map_location="cpu", weights_only=False)
+        xr = d["u"].numpy()                          # fp32 frame straight off disk
+        check("real disk frame loads legal", input_legality(xr)["legal"],
+              f"stored k_maxeta={d.get('k_max_eta', float('nan')):.3f}")
+        # modify it (legal adversarial) -> advance_raw -> next frame
+        xr_adv = legal_perturb(xr, amp=0.10, seed=42)
+        xn, info = advance_raw(xr_adv, return_info=True)
+        check("disk frame + legal perturb -> advance_raw -> legal next", info["next"]["legal"],
+              f"div={info['next']['div_residual']:.1e} keta={info['next']['k_max_eta']:.3f}")
+        moved = float(np.abs(xn - xr_adv).max())
+        check("next frame is a real evolution (not identity)", moved > 1e-3, f"max|dx|={moved:.2f}")
+        # illegal modification of a real frame -> raw refuses, projected accepts
+        xr_bad = xr + 0.05 * np.random.RandomState(0).randn(*xr.shape).astype("float32")
+        refused_r = False
+        try:
+            advance_raw(xr_bad)
+        except ValueError:
+            refused_r = True
+        check("real frame + illegal modification -> raw REFUSES", refused_r)
+        check("real frame + illegal modification -> projected returns legal next",
+              input_legality(advance_projected(xr_bad))["legal"])
+    else:
+        print("  [skip] no data/dns128_relam37 on disk — run generate_dataset.py to enable "
+              "the real-frame end-to-end test")
+
     # --- perturbation type 4: on_illegal='warn' proceeds; 'ignore' proceeds silently ---
     import warnings
     with warnings.catch_warnings(record=True) as w:
